@@ -26,4 +26,4 @@ python -m src.runner --input input --output output --ner heuristic
 pip install pdfplumber python-docx pydantic pyyaml structlog requests pytest
 
 Command
-python -m src.runner --ner gliner --input ./input --output ./output
+>C:\Users\Perdorues\Desktop\cv-pii-tool\.venv\Scripts\activate && python -m src.runner --ner gliner --input ./input --output ./output
