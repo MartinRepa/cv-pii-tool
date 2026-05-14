@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c \"from src.pii.schemas import PIIRecord, DetectionLog, BatchSummary; print\\('schemas OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from src.extraction.base import get_extractor; print\\('extraction OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import fpdf; print\\('fpdf2 ok'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import reportlab; print\\('reportlab ok'\\)\")",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/python.exe -m src.runner --input tests/fixtures --output output --workers 1 --dry-run)",
+      "Bash(.venv/Scripts/python.exe -m src.runner --input tests/fixtures --output output --workers 1)",
+      "Bash(find output/run_2026-05-10_08* -name \"*.json\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_pipeline_recall.py -s -v)"
+    ]
+  }
+}

@@ -1,0 +1,181 @@
+# ═══════════════════════════════════════════════════════════════
+#   CV PII Anonymisation Tool — Pipeline Configuration
+# ═══════════════════════════════════════════════════════════════
+#
+# This file is loaded at startup and validated against a Pydantic
+# config schema. Invalid values cause the runner to refuse to start.
+#
+# Environment variables defined in .env override values here.
+#
+# ═══════════════════════════════════════════════════════════════
+
+pipeline_version: "0.1.0"
+
+# ───────────────────────────────────────────────────────────────
+# L0 — Text Normaliser
+# ───────────────────────────────────────────────────────────────
+# Repairs OCR/spacing damage in raw text BEFORE PII detection.
+# Without this, OCR-damaged CVs leak ~78% of PII to downstream.
+# With it, leakage drops to <12% on the same CVs.
+#
+# Mode:
+#   auto   — detect damage heuristically and apply when needed
+#   always — apply unconditionally
+#   never  — skip
+# ───────────────────────────────────────────────────────────────
+normaliser:
+  mode: auto
+  ocr_damage_thresholds:
+    # Density of single-letter tokens triggering normaliser
+    single_letter_density: 0.08
+    # Density of "digit space digit" patterns triggering normaliser
+    digit_pair_density: 4.0
+
+# ───────────────────────────────────────────────────────────────
+# Recognisers — three layers stacked for high recall
+# ───────────────────────────────────────────────────────────────
+recognisers:
+
+  # --- L1: Pattern-based (regex) ---
+  # Catches structured PII with high precision: emails, phones,
+  # URLs, IDs, dates. Language-agnostic by design.
+  pattern:
+    enabled: true
+
+  # --- L2: NER (multilingual) ---
+  # Catches names, organisations, locations, addresses.
+  # GLiNER-Multi handles Albanian/EN/IT/etc. without retraining.
+  ner:
+    backend: gliner            # gliner | heuristic
+    
+    gliner:
+      model_id: "urchade/gliner_multi_pii-v1"
+      threshold: 0.5
+      labels:
+        - "person name"
+        - "full name"
+        - "email address"
+        - "phone number"
+        - "home address"
+        - "street address"
+        - "city"
+        - "country"
+        - "date of birth"
+        - "nationality"
+        - "linkedin profile"
+        - "github profile"
+        - "id number"
+        - "passport number"
+        - "organisation"
+        - "company"
+        - "school"
+        - "university"
+    
+    # Fallback recogniser if GLiNER fails to load
+    # (no model cache, no torch, etc.)
+    heuristic_fallback: true
+
+  # --- L3: LLM verification pass ---
+  # Local Ollama catches contextual PII the other layers miss
+  # (employer names, school references, implicit identifiers).
+  llm_verify:
+    enabled: true
+    ollama_url: "http://localhost:11434"
+    model: "llama3.1:8b"
+    timeout_seconds: 60
+    max_retries: 2
+    # If Ollama unreachable, skip layer and warn (graceful degrade)
+    skip_on_failure: true
+
+  # --- Personal Facts ---
+  # Detects sensitive attributes (marital status, gender, religion)
+  # that are GDPR Article 9 special category data.
+  personal_facts:
+    enabled: true
+
+# ───────────────────────────────────────────────────────────────
+# Deduplication
+# ───────────────────────────────────────────────────────────────
+# When multiple layers detect the same PII, how to merge.
+#   longest_match — keep widest span (recommended)
+#   first_seen    — keep first detection by position
+deduplication:
+  strategy: longest_match
+
+# ───────────────────────────────────────────────────────────────
+# Output
+# ───────────────────────────────────────────────────────────────
+output:
+  write_anonymised_text: true
+  write_pii_record: true
+  write_detection_log: true
+  write_batch_summary: true
+  
+  # Pretty-print JSON outputs (newlines + indent)
+  # Disable for slightly smaller files in production
+  pretty_print_json: true
+  
+  # Folder naming for each run
+  # Available variables: {timestamp}, {date}
+  run_folder_template: "run_{timestamp}"
+  
+  # Encoding
+  json_encoding: "utf-8"
+
+# ───────────────────────────────────────────────────────────────
+# Extraction
+# ───────────────────────────────────────────────────────────────
+extraction:
+  
+  # Minimum acceptable extraction quality (0.0 — 1.0)
+  # CVs below this are skipped with EXT_QUALITY_LOW reason
+  minimum_quality: 0.40
+  
+  pdf:
+    use_layout_aware: true
+  
+  docx:
+    include_tables: true
+    include_headers_footers: false
+  
+  ocr_fallback:
+    # Tesseract OCR for scanned PDFs (image-only, no text layer).
+    # Disabled by default — opt in explicitly if needed.
+    enabled: false
+    tesseract_lang: "sqp+eng+ita"   # Albanian + English + Italian
+    minimum_confidence: 0.6
+
+# ───────────────────────────────────────────────────────────────
+# Confidence Thresholds
+# ───────────────────────────────────────────────────────────────
+confidence:
+  # Detections below this score are flagged for human review
+  global_threshold: 0.85
+  
+  # Per-layer minimum confidence (detections below filtered out)
+  per_layer_minimum:
+    L1_pattern: 0.99            # regex matches always high-confidence
+    L2_ner: 0.50
+    L3_llm_verify: 0.70
+
+# ───────────────────────────────────────────────────────────────
+# Logging
+# ───────────────────────────────────────────────────────────────
+logging:
+  level: INFO                   # DEBUG | INFO | WARNING | ERROR
+  format: json                  # json | console
+  log_to_file: true
+  log_file: "./logs/pipeline.log"
+  
+  # Mask PII in log messages (always on — never disable)
+  mask_pii_in_logs: true
+
+# ───────────────────────────────────────────────────────────────
+# Performance
+# ───────────────────────────────────────────────────────────────
+performance:
+  # Default parallel workers (override with --workers)
+  default_workers: 4
+  
+  # Per-CV timeout (in seconds)
+  cv_timeout_seconds: 120

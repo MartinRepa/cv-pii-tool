@@ -1,0 +1,120 @@
+# ──────────────────────────────────────────────────────────────
+# CRITICAL: never commit input CVs or output JSON (real PII!)
+# ──────────────────────────────────────────────────────────────
+input/*
+!input/.gitkeep
+
+output/*
+!output/.gitkeep
+
+# Test fixtures CAN be committed (they're synthetic / consented)
+# tests/fixtures/  ← intentionally NOT ignored
+
+# ──────────────────────────────────────────────────────────────
+# Secrets and config overrides
+# ──────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+config/settings.local.yaml
+*.pem
+*.key
+*.crt
+
+# ──────────────────────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# ──────────────────────────────────────────────────────────────
+# Testing & coverage
+# ──────────────────────────────────────────────────────────────
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+
+# ──────────────────────────────────────────────────────────────
+# Type checking & linting caches
+# ──────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ──────────────────────────────────────────────────────────────
+# Editors / IDEs
+# ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ──────────────────────────────────────────────────────────────
+# OS
+# ──────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ──────────────────────────────────────────────────────────────
+# Logs
+# ──────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ──────────────────────────────────────────────────────────────
+# Model caches (large files — let users download them)
+# ──────────────────────────────────────────────────────────────
+.cache/
+models/
+*.bin
+*.safetensors

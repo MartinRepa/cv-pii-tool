@@ -1,0 +1,87 @@
+[project]
+name = "cv-pii-tool"
+version = "0.1.0"
+description = "Standalone CV PII anonymisation tool with multilingual support"
+requires-python = ">=3.11"
+authors = [
+    { name = "Your Name", email = "you@example.com" },
+]
+readme = "README.md"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "pdfplumber>=0.11.0,<1.0",
+    "python-docx>=1.1.0,<2.0",
+    "pydantic>=2.5.0,<3.0",
+    "PyYAML>=6.0,<7.0",
+    "structlog>=24.1.0,<25.0",
+    "gliner>=0.2.0,<1.0",
+    "torch>=2.0.0,<3.0",
+    "requests>=2.31.0,<3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<9.0",
+    "pytest-cov>=4.1.0,<5.0",
+    "ruff>=0.4.0,<1.0",
+    "mypy>=1.10.0,<2.0",
+]
+
+[project.scripts]
+cv-pii = "src.runner:main"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+# ─────────────────────────────────────────────────────────────────────
+# Pytest
+# ─────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "requires_gliner: requires GLiNER model loaded",
+    "requires_ollama: requires Ollama running locally",
+]
+
+# ─────────────────────────────────────────────────────────────────────
+# Ruff
+# ─────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "UP",     # pyupgrade
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line length (handled by formatter)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ─────────────────────────────────────────────────────────────────────
+# Mypy
+# ─────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true   # for libraries without stubs (gliner, pdfplumber)
