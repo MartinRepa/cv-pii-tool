@@ -1,0 +1,29 @@
+# 1. Clone
+git clone <repo-url>
+cd cv-pii-tool
+
+# 2. Python 3.11+ is required — check first
+python --version
+
+# 3. Create virtual environment
+python -m venv .venv
+
+# Windows:
+.venv\Scripts\activate
+# Mac/Linux:
+source .venv/bin/activate
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Verify
+pytest tests/test_sanitiser.py -q
+
+# 6. Drop CVs in and run
+# (copy your CV files into input/)
+python -m src.runner --input input --output output --ner heuristic
+
+pip install pdfplumber python-docx pydantic pyyaml structlog requests pytest
+
+Command
+>C:\Users\Perdorues\Desktop\cv-pii-tool\.venv\Scripts\activate && python -m src.runner --ner gliner --input ./input --output ./output
