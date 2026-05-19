@@ -30,7 +30,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.extraction.base import ExtractionResult, get_extractor
-from src.pii.pipeline import PIIPipeline, AnonymisationResult
+from src.pii.pipeline import PIIPipeline, PIIDetection, AnonymisationResult
 from src.pii.sanitiser import CVSanitiser
 from src.pii.schemas import (
     BatchSummary, ByLayerStats, Detection, DetectionLog, Failure,
@@ -50,6 +50,7 @@ class _NormaliserCfg(BaseModel):
 class _GLiNERCfg(BaseModel):
     model_config = ConfigDict(extra="ignore")
     model_id: str = "urchade/gliner_multi_pii-v1"
+    model_path: str | None = None
     threshold: float = 0.5
     labels: list[str] = Field(default_factory=list)
 
@@ -160,6 +161,10 @@ def _process_cv(
     dry_run: bool,
     ner_mode: str = "heuristic",
     gliner_cfg: dict | None = None,
+    llm_verify_enabled: bool = False,
+    ollama_url: str = "http://localhost:11434",
+    ollama_model: str = "llama3.1:8b",
+    ollama_timeout: int = 60,
 ) -> dict:
     t0 = time.monotonic()
     source_file = cv_path.name
@@ -179,13 +184,19 @@ def _process_cv(
     if ner_mode == "gliner" and gliner_cfg:
         try:
             from src.pii.recognisers.ner_gliner import GLiNERRecogniser
+            # Prefer explicit model_path; fall back to GLINER_MODEL_PATH env var
+            model_path = gliner_cfg.get("model_path") or os.getenv("GLINER_MODEL_PATH")
             ner_recogniser = GLiNERRecogniser(
                 model_id=gliner_cfg["model_id"],
                 threshold=gliner_cfg["threshold"],
                 labels=gliner_cfg["labels"],
+                model_path=model_path,
             )
-        except Exception:
-            pass  # fall through to heuristic
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "GLiNER failed to load (%s) — falling back to heuristic NER", exc
+            )
 
     pipeline = PIIPipeline(normalise=normalise_mode, ner_recogniser=ner_recogniser)
 
@@ -198,6 +209,48 @@ def _process_cv(
             "stage": "pipeline",
             "error": str(exc),
         }
+
+    # ── L3: Ollama LLM verification pass ──────────────────────────────────────
+    llm_verify_count = 0
+    if llm_verify_enabled:
+        try:
+            from src.pii.recognisers.llm_verify import OllamaVerifier
+            verifier = OllamaVerifier(ollama_url, ollama_model, ollama_timeout)
+            llm_raw = verifier.verify(result.anonymised_text)
+
+            if llm_raw:
+                # Find current max token index per entity type
+                counters: dict[str, int] = defaultdict(int)
+                for tok in result.pii_map:
+                    inner = tok.strip("[]")          # "PERSON_1"
+                    parts = inner.rsplit("_", 1)
+                    if len(parts) == 2 and parts[1].isdigit():
+                        etype = parts[0]
+                        counters[etype] = max(counters[etype], int(parts[1]))
+
+                # Apply replacements descending so indices stay valid
+                anon_text = result.anonymised_text
+                pii_map = dict(result.pii_map)
+                extra: list[PIIDetection] = []
+                for ent, val, s, e, conf in sorted(llm_raw, key=lambda x: -x[2]):
+                    counters[ent] += 1
+                    token = f"[{ent}_{counters[ent]}]"
+                    pii_map[token] = val
+                    anon_text = anon_text[:s] + token + anon_text[e:]
+                    extra.append(PIIDetection(ent, val, s, e, "L3_llm_verify", conf))
+
+                llm_verify_count = len(extra)
+                result = AnonymisationResult(
+                    anonymised_text=anon_text,
+                    pii_map=pii_map,
+                    detections=result.detections + extra,
+                    was_normalised=result.was_normalised,
+                )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "OllamaVerifier skipped (%s) — LLM layer unavailable", exc
+            )
 
     now_utc = datetime.now(timezone.utc)
     pii_fields = _build_pii_fields(result)
@@ -267,8 +320,13 @@ def _process_cv(
                 damage_indicators={},
             ),
             L1_pattern=by_layer_counts.get("L1_pattern", 0),
-            L2_ner=by_layer_counts.get("L2_ner", 0),
-            L3_llm_verify=by_layer_counts.get("L3_personal", 0),
+            # Combine heuristic NER, GLiNER, and header-name detections under L2
+            L2_ner=(
+                by_layer_counts.get("L2_ner", 0)
+                + by_layer_counts.get("L2_gliner", 0)
+                + by_layer_counts.get("L0_header", 0)
+            ),
+            L3_llm_verify=by_layer_counts.get("L3_llm_verify", 0),
         ),
         by_entity_type=dict(by_entity),
         low_confidence_flags=low_flags,
@@ -391,20 +449,43 @@ def main(argv: list[str] | None = None) -> int:
     ner_mode = args.ner
     gliner_cfg: dict | None = None
     if ner_mode == "gliner":
+        # model_path: YAML value wins; GLINER_MODEL_PATH env var is the fallback
+        model_path = cfg.recognisers.ner.gliner.model_path or os.getenv("GLINER_MODEL_PATH")
         gliner_cfg = {
             "model_id": cfg.recognisers.ner.gliner.model_id,
+            "model_path": model_path,
             "threshold": cfg.recognisers.ner.gliner.threshold,
             "labels": list(cfg.recognisers.ner.gliner.labels),
         }
         if not args.quiet:
-            print("Loading GLiNER model (first run downloads ~500 MB)...")
+            if model_path:
+                print(f"Loading GLiNER model from local path: {model_path}")
+            else:
+                print("Loading GLiNER model (first run downloads ~500 MB)...")
+
+    # LLM verify settings
+    llm_verify_enabled = args.llm_verify
+    ollama_url = args.ollama_url
+    ollama_model = args.ollama_model
+    ollama_timeout = cfg.recognisers.llm_verify.timeout_seconds
+    if llm_verify_enabled and not args.quiet:
+        print(f"LLM verification: Ollama {ollama_url} ({ollama_model})")
+
+    _cv_kwargs = dict(
+        normalise_mode=normalise_mode,
+        confidence_threshold=confidence_threshold,
+        dry_run=dry_run,
+        ner_mode=ner_mode,
+        gliner_cfg=gliner_cfg,
+        llm_verify_enabled=llm_verify_enabled,
+        ollama_url=ollama_url,
+        ollama_model=ollama_model,
+        ollama_timeout=ollama_timeout,
+    )
 
     if workers == 1:
         for cv_path in cv_files:
-            r = _process_cv(
-                cv_path, run_dir, normalise_mode, confidence_threshold,
-                dry_run, ner_mode, gliner_cfg,
-            )
+            r = _process_cv(cv_path, run_dir, **_cv_kwargs)
             per_cv_results.append(r)
     else:
         with ProcessPoolExecutor(
@@ -413,10 +494,7 @@ def main(argv: list[str] | None = None) -> int:
             initargs=(_PROJECT_ROOT,),
         ) as executor:
             futures = {
-                executor.submit(
-                    _process_cv, cv, run_dir, normalise_mode, confidence_threshold,
-                    dry_run, ner_mode, gliner_cfg,
-                ): cv
+                executor.submit(_process_cv, cv, run_dir, **_cv_kwargs): cv
                 for cv in cv_files
             }
             for future in as_completed(futures):
