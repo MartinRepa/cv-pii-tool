@@ -50,6 +50,11 @@ recognisers:
     
     gliner:
       model_id: "urchade/gliner_multi_pii-v1"
+      # Local path override for air-gapped / corporate environments.
+      # Set to an absolute path containing config.json, OR leave null to
+      # download from Hugging Face (respects HF_HUB_OFFLINE env var).
+      # Can also be set via GLINER_MODEL_PATH environment variable.
+      model_path: null
       threshold: 0.5
       labels:
         - "person name"
