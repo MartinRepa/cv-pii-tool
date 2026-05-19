@@ -1502,6 +1502,139 @@ target-version = "py311"
 
 ---
 
+## 12.1 Corporate Network & Offline Model Support
+
+The tool MUST work in corporate environments with HTTP proxies, TLS inspection,
+and air-gapped (no-internet) networks.
+
+### Required Behaviour
+
+**Proxy support:**
+- Read `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` env vars
+- Read `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` for corporate CA certificates
+- Apply both BEFORE importing `gliner` or `transformers`
+- Use `huggingface_hub.configure_http_backend()` to inject a requests Session
+  with proxy and CA bundle configured
+
+**Offline mode:**
+- Read `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` env vars
+- When `HF_HUB_OFFLINE=1`, set the env var at process start (before any HF import)
+- When offline mode is on, the model loader must NEVER attempt network calls
+
+**Local model loading:**
+- Read `GLINER_MODEL_PATH` env var
+- If set AND the folder exists AND contains `config.json`, load from that path
+- Otherwise fall back to downloading from `GLINER_MODEL_ID` (Hugging Face)
+- Log clearly which source was used
+
+### Implementation
+
+**`src/pii/recognisers/ner_gliner.py`** must include this exact preamble
+before any `gliner` import:
+
+```python
+import os
+from pathlib import Path
+
+# Apply offline mode BEFORE any HuggingFace imports
+if os.getenv("HF_HUB_OFFLINE") == "1":
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+if os.getenv("TRANSFORMERS_OFFLINE") == "1":
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+def _configure_corporate_network() -> None:
+    """Configure HTTP backend for corporate proxies with optional CA bundle."""
+    proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    ca_bundle = os.getenv("REQUESTS_CA_BUNDLE") or os.getenv("SSL_CERT_FILE")
+    if not proxy and not ca_bundle:
+        return
+
+    try:
+        from huggingface_hub import configure_http_backend
+        import requests
+    except ImportError:
+        return  # huggingface_hub not yet installed
+
+    def backend_factory() -> "requests.Session":
+        session = requests.Session()
+        if proxy:
+            session.proxies = {
+                "http": os.getenv("HTTP_PROXY", proxy),
+                "https": os.getenv("HTTPS_PROXY", proxy),
+            }
+        if ca_bundle:
+            session.verify = ca_bundle
+        return session
+
+    configure_http_backend(backend_factory=backend_factory)
+
+
+_configure_corporate_network()
+```
+
+The `GLiNERRecogniser.__init__` must accept an optional `model_path` and
+prefer it over `model_id`:
+
+```python
+class GLiNERRecogniser:
+    def __init__(
+        self,
+        model_id: str,
+        threshold: float,
+        labels: list[str],
+        model_path: str | None = None,
+    ) -> None:
+        from gliner import GLiNER
+
+        if model_path:
+            path = Path(model_path)
+            if path.exists() and (path / "config.json").exists():
+                logger.info("loading_gliner_from_local_path", path=str(path))
+                self.model = GLiNER.from_pretrained(str(path))
+            else:
+                logger.warning(
+                    "gliner_local_path_not_found_falling_back",
+                    path=str(path),
+                    fallback_id=model_id,
+                )
+                self.model = GLiNER.from_pretrained(model_id)
+        else:
+            logger.info("loading_gliner_from_hub", model_id=model_id)
+            self.model = GLiNER.from_pretrained(model_id)
+
+        self.threshold = threshold
+        self.labels = labels
+```
+
+### Settings.yaml additions
+
+`config/settings.yaml` must support the new fields:
+
+```yaml
+recognisers:
+  ner:
+    gliner:
+      model_id: "urchade/gliner_multi_pii-v1"
+      model_path: null              # absolute or relative path; null = use model_id
+      threshold: 0.5
+      labels: [...]
+```
+
+The settings loader reads `GLINER_MODEL_PATH` env var as fallback when
+`model_path` is null in the YAML.
+
+### scripts/download_models_offline.py
+
+Build a script with this contract:
+
+- Reads `GLINER_MODEL_SOURCE` env var (URL to a zip)
+- If set: download the zip, extract to `GLINER_MODEL_PATH`
+- If not set OR download fails: fall back to `huggingface_hub.snapshot_download`
+- Verifies the resulting folder contains `config.json` before exiting success
+- Prints progress (MB downloaded / total)
+- Idempotent — exits success if model already present
+
 ## 13. Build Order
 
 Build in this exact sequence. Run tests after each step.
