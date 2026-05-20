@@ -147,10 +147,46 @@ def _build_pii_fields(result: AnonymisationResult) -> PIIFields:
 
 # ── per-CV processing (runs in worker process) ────────────────────────────────
 
-def _worker_init(project_root: str) -> None:
-    """Insert project root into sys.path for spawned worker processes."""
+# Module-level cache: GLiNER is expensive to load — share across CVs in the
+# same worker process.  Populated once by _worker_init or by the first call to
+# _get_gliner() in single-worker mode.
+_GLINER_CACHE: "GLiNERRecogniser | None" = None  # type: ignore[name-defined]
+
+
+def _get_gliner(gliner_cfg: dict) -> "GLiNERRecogniser | None":  # type: ignore[name-defined]
+    """Return the cached GLiNER recogniser, loading it on first call."""
+    global _GLINER_CACHE
+    if _GLINER_CACHE is not None:
+        return _GLINER_CACHE
+    try:
+        from src.pii.recognisers.ner_gliner import GLiNERRecogniser
+        model_path = gliner_cfg.get("model_path") or os.getenv("GLINER_MODEL_PATH")
+        _GLINER_CACHE = GLiNERRecogniser(
+            model_id=gliner_cfg["model_id"],
+            threshold=gliner_cfg["threshold"],
+            labels=gliner_cfg["labels"],
+            model_path=model_path,
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "GLiNER failed to load (%s) — falling back to heuristic NER", exc
+        )
+        _GLINER_CACHE = None  # type: ignore[assignment]
+    return _GLINER_CACHE
+
+
+def _worker_init(project_root: str, gliner_cfg: dict | None = None) -> None:
+    """
+    Called once per worker process by ProcessPoolExecutor.
+
+    Sets up sys.path and pre-loads the GLiNER model so that every CV
+    processed by this worker reuses the already-loaded model.
+    """
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
+    if gliner_cfg:
+        _get_gliner(gliner_cfg)  # warm the cache for this worker
 
 
 def _process_cv(
@@ -180,23 +216,8 @@ def _process_cv(
             "error": str(exc),
         }
 
-    ner_recogniser = None
-    if ner_mode == "gliner" and gliner_cfg:
-        try:
-            from src.pii.recognisers.ner_gliner import GLiNERRecogniser
-            # Prefer explicit model_path; fall back to GLINER_MODEL_PATH env var
-            model_path = gliner_cfg.get("model_path") or os.getenv("GLINER_MODEL_PATH")
-            ner_recogniser = GLiNERRecogniser(
-                model_id=gliner_cfg["model_id"],
-                threshold=gliner_cfg["threshold"],
-                labels=gliner_cfg["labels"],
-                model_path=model_path,
-            )
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                "GLiNER failed to load (%s) — falling back to heuristic NER", exc
-            )
+    # Reuse the worker-level cached model (loaded once per process)
+    ner_recogniser = _get_gliner(gliner_cfg) if (ner_mode == "gliner" and gliner_cfg) else None
 
     pipeline = PIIPipeline(normalise=normalise_mode, ner_recogniser=ner_recogniser)
 
@@ -491,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_worker_init,
-            initargs=(_PROJECT_ROOT,),
+            initargs=(_PROJECT_ROOT, gliner_cfg),
         ) as executor:
             futures = {
                 executor.submit(_process_cv, cv, run_dir, **_cv_kwargs): cv
