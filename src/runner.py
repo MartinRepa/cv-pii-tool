@@ -21,6 +21,15 @@ from pathlib import Path as _Path
 _PROJECT_ROOT = str(_Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
+
+# Load .env file early so GLINER_MODEL_PATH, HF_HUB_OFFLINE, etc. are visible
+# to all subsequent imports (including GLiNER / HuggingFace).
+# python-dotenv is optional — silently skipped if not installed.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(_PROJECT_ROOT) / ".env", override=False)
+except ImportError:
+    pass  # dotenv not installed — rely on shell environment
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,9 +177,12 @@ def _get_gliner(gliner_cfg: dict) -> "GLiNERRecogniser | None":  # type: ignore[
             model_path=model_path,
         )
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning(
-            "GLiNER failed to load (%s) — falling back to heuristic NER", exc
+        print(
+            f"\nWARNING: GLiNER failed to load — falling back to heuristic NER.\n"
+            f"  Reason : {exc}\n"
+            f"  Fix    : set GLINER_MODEL_PATH to the local model folder, or\n"
+            f"           run:  python scripts/download_models_offline.py\n",
+            file=sys.stderr,
         )
         _GLINER_CACHE = None  # type: ignore[assignment]
     return _GLINER_CACHE

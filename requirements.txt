@@ -4,6 +4,7 @@ python-docx>=1.1.0,<2.0
 pydantic>=2.5.0,<3.0
 PyYAML>=6.0,<7.0
 structlog>=24.1.0,<25.0
+python-dotenv>=1.0.0,<2.0   # loads .env file at startup (GLINER_MODEL_PATH etc.)
 
 # Phase 2 — multilingual NER
 gliner>=0.2.0,<1.0
