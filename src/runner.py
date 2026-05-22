@@ -24,12 +24,36 @@ if _PROJECT_ROOT not in sys.path:
 
 # Load .env file early so GLINER_MODEL_PATH, HF_HUB_OFFLINE, etc. are visible
 # to all subsequent imports (including GLiNER / HuggingFace).
-# python-dotenv is optional — silently skipped if not installed.
+# python-dotenv is optional - silently skipped if not installed.
 try:
     from dotenv import load_dotenv as _load_dotenv
     _load_dotenv(_Path(_PROJECT_ROOT) / ".env", override=False)
 except ImportError:
-    pass  # dotenv not installed — rely on shell environment
+    pass  # dotenv not installed - rely on shell environment
+
+# CRITICAL: HuggingFace reads these env vars at IMPORT time, not runtime.
+# We must (1) resolve relative paths to absolute, (2) ensure they're in
+# os.environ, BEFORE any gliner / transformers / huggingface_hub import.
+
+# Resolve relative cache paths to absolute (HF requires absolute paths on Windows)
+for _hf_var in ("HF_HOME", "TRANSFORMERS_CACHE", "HUGGINGFACE_HUB_CACHE"):
+    _val = os.environ.get(_hf_var)
+    if _val:
+        os.environ[_hf_var] = str(_Path(_val).expanduser().resolve())
+
+# Force offline mode if requested in .env
+if os.environ.get("HF_HUB_OFFLINE") == "1":
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    # Belt and suspenders — also stop telemetry attempts
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["DISABLE_TELEMETRY"] = "1"
+
+# Resolve GLINER_MODEL_PATH to absolute path too
+if _gliner_path := os.environ.get("GLINER_MODEL_PATH"):
+    os.environ["GLINER_MODEL_PATH"] = str(_Path(_gliner_path).expanduser().resolve())
+
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
