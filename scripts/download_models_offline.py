@@ -60,8 +60,14 @@ MODEL_ID = os.getenv("GLINER_MODEL_ID", DEFAULT_MODEL_ID)
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _is_already_present(dest: Path) -> bool:
-    """Return True if the model folder already contains config.json."""
-    return (dest / "config.json").exists()
+    """Return True if the model folder contains the GLiNER model files.
+
+    urchade/gliner_multi_pii-v1 uses gliner_config.json (not config.json).
+    We accept either name plus the presence of the model weights.
+    """
+    has_config = (dest / "config.json").exists() or (dest / "gliner_config.json").exists()
+    has_weights = (dest / "pytorch_model.bin").exists() or (dest / "model.safetensors").exists()
+    return has_config and has_weights
 
 
 def _make_session():

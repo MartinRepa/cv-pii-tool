@@ -172,11 +172,14 @@ class GLiNERRecogniser:
             ) from exc
 
         # Resolve model path: explicit arg > GLINER_MODEL_PATH env var > HF Hub
+        # urchade/gliner_multi_pii-v1 uses gliner_config.json, not config.json.
+        # Accept either name so the check works for all GLiNER model variants.
         resolved_path: Path | None = None
         candidate = model_path or os.getenv("GLINER_MODEL_PATH")
         if candidate:
             p = Path(candidate)
-            if p.exists() and (p / "config.json").exists():
+            has_config = (p / "config.json").exists() or (p / "gliner_config.json").exists()
+            if p.exists() and has_config:
                 resolved_path = p
             else:
                 logger.warning(
