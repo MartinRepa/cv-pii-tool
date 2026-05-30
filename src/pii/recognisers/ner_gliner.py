@@ -17,10 +17,51 @@ TLS and proxy settings take effect at the socket level.
 """
 from __future__ import annotations
 
+import logging
 import os
+import warnings
 from pathlib import Path
 
 import structlog
+
+# ── Suppress cosmetic upstream warnings ───────────────────────────────────────
+# mDeBERTa ships with a known-bad regex pattern in its tokenizer config.
+# The warning is harmless — tokenization is unaffected — but it pollutes
+# stderr on every model load.
+#
+# Two suppression layers are needed because different versions of transformers
+# route this message differently:
+#   - older versions: warnings.warn() → caught by filterwarnings
+#   - newer versions: logger.warning_once() → caught by logging filter
+
+warnings.filterwarnings("ignore", message=r".*incorrect regex pattern.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Sentence of length.*has been truncated.*", category=UserWarning)
+
+
+class _SubstringFilter(logging.Filter):
+    """Drop any log record whose message contains one of the given substrings."""
+    def __init__(self, *substrings: str) -> None:
+        super().__init__()
+        self._blocked = substrings
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(s in msg for s in self._blocked)
+
+
+_NOISE_FILTER = _SubstringFilter(
+    "incorrect regex pattern",
+    "has been truncated to",
+    "fix_mistral_regex",
+)
+
+# Attach to the transformers loggers that emit these messages
+for _noisy_logger in (
+    "transformers.tokenization_utils_base",
+    "transformers.tokenization_utils",
+    "gliner.data_processing.processor",
+):
+    logging.getLogger(_noisy_logger).addFilter(_NOISE_FILTER)
 
 # ── Apply offline-mode flags before any HuggingFace import ────────────────────
 # These must be set as early as possible — setting them after the first HF
@@ -113,6 +154,39 @@ logger = structlog.get_logger(__name__)
 
 __all__ = ["GLiNERRecogniser"]
 
+# ── Chunking constants ─────────────────────────────────────────────────────────
+# GLiNER / mDeBERTa has a hard 384-token limit.  At ~4 chars/token for
+# Latin-script text, 1 000 chars ≈ 250 tokens — safely under the limit.
+# Overlap re-processes the boundary zone so entities that straddle a chunk
+# boundary are still caught in full by the adjacent chunk.
+_CHUNK_CHARS: int = 1_000
+_OVERLAP_CHARS: int = 150
+
+
+def _chunk_text(text: str) -> list[tuple[str, int]]:
+    """
+    Split *text* into (chunk, start_offset) pairs.
+
+    Snaps each split point to the nearest preceding newline so we don't cut
+    mid-word / mid-entity.  The last chunk always reaches the end of the text.
+    """
+    chunks: list[tuple[str, int]] = []
+    n = len(text)
+    start = 0
+    while start < n:
+        end = min(start + _CHUNK_CHARS, n)
+        # Snap to nearest newline before the hard cut (avoids mid-entity splits)
+        if end < n:
+            nl = text.rfind("\n", start + _CHUNK_CHARS // 2, end)
+            if nl != -1:
+                end = nl + 1          # include the newline in this chunk
+        chunks.append((text[start:end], start))
+        if end >= n:
+            break
+        start = end - _OVERLAP_CHARS  # back up so the next chunk overlaps
+    return chunks
+
+
 # ── GLiNER label → pipeline canonical type ────────────────────────────────────
 LABEL_MAP: dict[str, str] = {
     "person name":      "PERSON",
@@ -188,12 +262,31 @@ class GLiNERRecogniser:
                     fallback_id=model_id,
                 )
 
-        if resolved_path is not None:
-            logger.info("loading_gliner_from_local_path", path=str(resolved_path))
-            self.model = GLiNER.from_pretrained(str(resolved_path))
-        else:
-            logger.info("loading_gliner_from_hub", model_id=model_id)
-            self.model = GLiNER.from_pretrained(model_id)
+        # Suppress the mDeBERTa tokenizer regex warning via transformers' own
+        # API (set_verbosity_error) — the filter/warnings approaches don't
+        # reliably intercept messages emitted by transformers' internal handler.
+        try:
+            from transformers import logging as _hf_logging
+            _prev = _hf_logging.get_verbosity()
+            _hf_logging.set_verbosity_error()
+        except Exception:
+            _prev = None
+
+        try:
+            if resolved_path is not None:
+                logger.info("loading_gliner_from_local_path", path=str(resolved_path))
+                self.model = GLiNER.from_pretrained(str(resolved_path))
+            else:
+                logger.info("loading_gliner_from_hub", model_id=model_id)
+                self.model = GLiNER.from_pretrained(model_id)
+        finally:
+            # Always restore verbosity so other code isn't silenced
+            if _prev is not None:
+                try:
+                    from transformers import logging as _hf_logging
+                    _hf_logging.set_verbosity(_prev)
+                except Exception:
+                    pass
 
         self.threshold = threshold
         self.labels = labels
@@ -202,12 +295,33 @@ class GLiNERRecogniser:
         """
         Run GLiNER on *text* and return canonical detections.
 
+        Long texts are split into overlapping chunks so no content exceeds
+        GLiNER's 384-token limit.  Detections from the overlap zone are
+        deduplicated by (text, start, end) so each entity is returned once.
+
         Returns
         -------
         list of (entity_type, matched_text, start, end, confidence)
         """
+        if len(text) <= _CHUNK_CHARS:
+            return self._detect_chunk(text, 0)
+
+        seen: set[tuple[str, int, int]] = set()
+        results: list[tuple[str, str, int, int, float]] = []
+        for chunk, offset in _chunk_text(text):
+            for row in self._detect_chunk(chunk, offset):
+                key = (row[1], row[2], row[3])   # (matched_text, start, end)
+                if key not in seen:
+                    seen.add(key)
+                    results.append(row)
+        return results
+
+    def _detect_chunk(
+        self, chunk: str, offset: int
+    ) -> list[tuple[str, str, int, int, float]]:
+        """Run GLiNER on a single chunk and return detections with global offsets."""
         entities = self.model.predict_entities(
-            text, self.labels, threshold=self.threshold
+            chunk, self.labels, threshold=self.threshold
         )
         results: list[tuple[str, str, int, int, float]] = []
         for ent in entities:
@@ -217,7 +331,11 @@ class GLiNERRecogniser:
             if "\n" in matched:
                 continue
             canonical = LABEL_MAP.get(ent["label"].lower(), ent["label"].upper())
-            results.append(
-                (canonical, matched, ent["start"], ent["end"], ent["score"])
-            )
+            results.append((
+                canonical,
+                matched,
+                ent["start"] + offset,   # translate to global text position
+                ent["end"] + offset,
+                ent["score"],
+            ))
         return results
